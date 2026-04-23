@@ -2,6 +2,28 @@
 
 All notable changes to RoonTag. Newest first.
 
+## 1.4.0 — 2026-04-22
+- Redesigned UI. Toolbar is now grouped into intake (Add Files / Add
+  Folder) on the left and action (Fetch / Process) on the right. The
+  title bar is cleaner, the detail pane is organized into labelled cards
+  (Metadata, Album Type, Tracklist, Tracks) with clearer hierarchy.
+- Added: a native macOS menu bar at the top of the screen with File,
+  Tags, and Settings menus. About and Check for Updates now live under
+  the RoonTag app menu. Keyboard shortcuts: Cmd+O (Add Files),
+  Cmd+Shift+O (Add Folder), Cmd+F (Fetch), Cmd+S (Save Changes),
+  Cmd+Return (Process All).
+- Added: tracklist-to-lyrics for single-file compilations and live
+  albums. Flagging **any** of DJ Mix / Live Album / Compilation now
+  reveals the Tracklist field. Whatever you type there is embedded into
+  USLT lyrics on MP3, FLAC, AIFF, and M4A — so Roon can read the
+  tracklist off any single-file compilation or live set.
+- Fixed: Check for Updates no longer says "couldn't reach GitHub" when
+  the real situation is "no releases published yet." The dialog now
+  distinguishes between up-to-date, no-releases, and network errors,
+  and shows the relevant information with next-step guidance.
+- Fixed: tracklist embedding now works in AIFF and M4A files too (was
+  previously only MP3 and FLAC).
+
 ## 1.3.0 — 2026-04-22
 - Added: in-app auto-update. On launch, RoonTag quietly checks GitHub
   Releases for a newer version and offers a one-click install. No more

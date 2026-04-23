@@ -119,20 +119,38 @@ def _parse_version(s: str) -> tuple:
             out.append(0)
     return tuple(out) or (0,)
 
-def _fetch_latest_release() -> dict:
-    """Fetch latest release metadata from GitHub. Returns {} on any failure."""
+def _fetch_latest_release() -> tuple:
+    """Fetch latest release metadata from GitHub.
+
+    Returns:
+        ("ok", data)          — release found
+        ("no_releases", {})   — repo exists but no releases yet (HTTP 404)
+        ("error", {"msg":...})— network/other failure
+    """
+    import sys
+    import urllib.error
     try:
         req = urllib.request.Request(
             UPDATE_RELEASES_API,
             headers={"Accept": "application/vnd.github+json",
                      "User-Agent": f"RoonTag/{VERSION}"},
         )
-        with urllib.request.urlopen(req, timeout=6) as r:
-            return json.loads(r.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return "ok", json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        print(f"[RoonTag] update check HTTP {e.code}: {e.reason}",
+              file=sys.stderr, flush=True)
+        if e.code == 404:
+            return "no_releases", {}
+        return "error", {"msg": f"GitHub returned HTTP {e.code}: {e.reason}"}
+    except urllib.error.URLError as e:
+        print(f"[RoonTag] update check network error: {e.reason}",
+              file=sys.stderr, flush=True)
+        return "error", {"msg": f"Network unreachable: {e.reason}"}
     except Exception as e:
-        import sys
-        print(f"[RoonTag] update check failed: {e}", file=sys.stderr, flush=True)
-        return {}
+        print(f"[RoonTag] update check failed: {e}",
+              file=sys.stderr, flush=True)
+        return "error", {"msg": str(e)}
 
 # When running as a bundled .app, redirect stdout/stderr to a log file
 # so errors are visible via Console.app instead of disappearing silently.
@@ -205,11 +223,15 @@ MUSIC_EXTS = {".mp3", ".flac", ".aif", ".aiff", ".wav", ".m4a"}
 
 # ── colours (macOS light) ────────────────────────────────────────────────────
 BG       = "#f5f5f7"   # window background (Apple light grey)
-BG2      = "#ffffff"   # sidebar / toolbar
-BG3      = "#ebebed"   # input fields, table rows
+BG2      = "#ffffff"   # cards, toolbar, queue background
+BG3      = "#f0f0f2"   # input fields, table rows
+BG_HOVER = "#e8e8ea"   # hover state
 ACCENT   = "#0071e3"   # Apple blue
+ACCENT_HI = "#0077ed"
+ACCENT_LO = "#005bbf"
 FG       = "#1d1d1f"   # primary text
 FG_DIM   = "#6e6e73"   # secondary/label text
+FG_MUTED = "#86868b"   # tertiary / caption
 SEL      = "#cce4ff"   # selected row
 ERR      = "#c0392b"
 OK       = "#28a745"
@@ -662,7 +684,9 @@ def _write_mp3(track: Track, alb: Album) -> None:
         tags["TDRC"] = TDRC(encoding=3, text=alb.year)
     if track.track_num:
         tags["TRCK"] = TRCK(encoding=3, text=str(track.track_num))
-    if alb.tracklist and alb.is_dj_mix:
+    # Embed the tracklist into USLT whenever the user provided one — works for
+    # DJ mixes, live albums, and single-file compilations alike.
+    if alb.tracklist:
         tags.delall("USLT")
         tags.add(USLT(encoding=3, lang="eng", desc="", text=alb.tracklist))
     if alb.artwork_bytes:
@@ -681,7 +705,7 @@ def _write_flac(track: Track, alb: Album) -> None:
         audio["date"]    = alb.year
     if track.track_num:
         audio["tracknumber"] = str(track.track_num)
-    if alb.is_dj_mix and alb.tracklist:
+    if alb.tracklist:
         audio["lyrics"]  = alb.tracklist
     if alb.artwork_bytes:
         pic = Picture()
@@ -705,6 +729,11 @@ def _write_aiff(track: Track, alb: Album) -> None:
     tags["TIT2"] = TIT2(encoding=3, text=track.title)
     if alb.year:
         tags["TDRC"] = TDRC(encoding=3, text=alb.year)
+    if alb.tracklist:
+        for key in list(tags.keys()):
+            if key.startswith("USLT"):
+                del tags[key]
+        tags.add(USLT(encoding=3, lang="eng", desc="", text=alb.tracklist))
     if alb.artwork_bytes:
         for key in list(tags.keys()):
             if key.startswith("APIC"):
@@ -723,6 +752,8 @@ def _write_m4a(track: Track, alb: Album) -> None:
         audio.tags["©day"] = [alb.year]
     if track.track_num:
         audio.tags["trkn"] = [(track.track_num, len(alb.tracks))]
+    if alb.tracklist:
+        audio.tags["©lyr"] = [alb.tracklist]
     if alb.artwork_bytes:
         fmt = MP4Cover.FORMAT_JPEG
         if alb.artwork_mime == "image/png":
@@ -814,63 +845,165 @@ class RoonTag:
 
     # ── styles ──────────────────────────────────────────────────────────
 
+    def _setup_menubar(self):
+        """Build the native macOS menu bar. Lives at the top of the screen."""
+        menubar = tk.Menu(self.root)
+
+        # Apple/App menu (name='apple' is treated specially on macOS)
+        app_menu = tk.Menu(menubar, name="apple", tearoff=False)
+        menubar.add_cascade(menu=app_menu)
+        app_menu.add_command(label="About RoonTag",
+                             command=self._show_about)
+        app_menu.add_separator()
+        app_menu.add_command(label="Check for Updates…",
+                             command=lambda: self._check_for_updates(silent=False))
+
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=False)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Add Files…",
+                              accelerator="Cmd+O",
+                              command=self._add_files)
+        file_menu.add_command(label="Add Folder…",
+                              accelerator="Cmd+Shift+O",
+                              command=self._add_folder)
+        file_menu.add_separator()
+        file_menu.add_command(label="Clear Completed",
+                              command=self._clear_done)
+
+        # Tags menu — actions that act on the current selection
+        tags_menu = tk.Menu(menubar, tearoff=False)
+        menubar.add_cascade(label="Tags", menu=tags_menu)
+        tags_menu.add_command(label="Fetch Metadata + Artwork",
+                              accelerator="Cmd+F",
+                              command=self._fetch_current_metadata)
+        tags_menu.add_command(label="Fetch All",
+                              command=self._fetch_all_metadata)
+        tags_menu.add_separator()
+        tags_menu.add_command(label="Save Changes",
+                              accelerator="Cmd+S",
+                              command=self._apply_fields)
+        tags_menu.add_command(label="Process All",
+                              accelerator="Cmd+Return",
+                              command=self._process_all)
+
+        # Settings
+        settings_menu = tk.Menu(menubar, tearoff=False)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+        settings_menu.add_command(label="Roon Folder…",
+                                  command=self._set_roon_dir)
+
+        self.root.configure(menu=menubar)
+
+        # Keyboard shortcuts (work whether or not the menu consumes them)
+        self.root.bind_all("<Command-o>",       lambda e: self._add_files())
+        self.root.bind_all("<Command-O>",       lambda e: self._add_folder())
+        self.root.bind_all("<Command-f>",       lambda e: self._fetch_current_metadata())
+        self.root.bind_all("<Command-s>",       lambda e: self._apply_fields())
+        self.root.bind_all("<Command-Return>",  lambda e: self._process_all())
+
     def _setup_styles(self):
         s = ttk.Style(self.root)
         s.theme_use("clam")
         s.configure(".", background=BG, foreground=FG,
                     fieldbackground=BG2, borderwidth=0, relief="flat")
         s.configure("TFrame", background=BG)
+        s.configure("Card.TFrame", background=BG2)
         s.configure("TLabel", background=BG, foreground=FG)
+        s.configure("Card.TLabel", background=BG2, foreground=FG)
+        s.configure("Dim.TLabel", background=BG, foreground=FG_DIM,
+                    font=("SF Pro Text", 10, "bold"))
+
+        # Secondary button (default). Softer, rounded-ish via padding.
         s.configure("TButton", background=BG2, foreground=FG,
-                    padding=(11, 5), relief="flat", borderwidth=1, bordercolor=BORDER)
+                    padding=(12, 6), relief="flat", borderwidth=1, bordercolor=BORDER,
+                    font=("SF Pro Text", 12))
         s.map("TButton",
-              background=[("active", BG3), ("pressed", BG3)],
+              background=[("active", BG_HOVER), ("pressed", BG3)],
               foreground=[("active", FG), ("pressed", FG)])
+
+        # Primary button — accent filled
         s.configure("Accent.TButton", background=ACCENT, foreground="#fff",
-                    padding=(13, 6), relief="flat")
+                    padding=(16, 7), relief="flat", borderwidth=0,
+                    font=("SF Pro Text", 12, "bold"))
         s.map("Accent.TButton",
-              background=[("active", "#0077ed"), ("pressed", "#005bbf")],
+              background=[("active", ACCENT_HI), ("pressed", ACCENT_LO)],
               foreground=[("active", "#fff"), ("pressed", "#fff")])
+
+        # Ghost button — text-style, for lightweight actions
+        s.configure("Ghost.TButton", background=BG, foreground=ACCENT,
+                    padding=(8, 5), relief="flat", borderwidth=0,
+                    font=("SF Pro Text", 12))
+        s.map("Ghost.TButton",
+              background=[("active", BG_HOVER), ("pressed", BG3)],
+              foreground=[("active", ACCENT), ("pressed", ACCENT)])
+
+        # Treeview
         s.configure("Treeview", background=BG2, foreground=FG,
-                    fieldbackground=BG2, rowheight=26, borderwidth=0,
+                    fieldbackground=BG2, rowheight=28, borderwidth=0,
                     font=("SF Pro Text", 12))
         s.configure("Treeview.Heading", background=BG3, foreground=FG_DIM,
-                    relief="flat", padding=(8, 4), font=("SF Pro Text", 11))
+                    relief="flat", padding=(10, 5), font=("SF Pro Text", 10, "bold"))
         s.map("Treeview",
               background=[("selected", SEL)],
               foreground=[("selected", FG)])
+
+        # Entries
         s.configure("TEntry", fieldbackground=BG2, foreground=FG,
-                    insertcolor=FG, relief="flat", padding=(7, 5),
+                    insertcolor=FG, relief="flat", padding=(8, 6),
                     borderwidth=1, bordercolor=BORDER)
+        s.map("TEntry", bordercolor=[("focus", ACCENT)])
+
+        # Check / Scroll
         s.configure("TCheckbutton", background=BG, foreground=FG,
                     font=("SF Pro Text", 12))
         s.map("TCheckbutton", background=[("active", BG)])
+        s.configure("Card.TCheckbutton", background=BG2, foreground=FG,
+                    font=("SF Pro Text", 12))
+        s.map("Card.TCheckbutton", background=[("active", BG2)])
         s.configure("TScrollbar", background=BG3, troughcolor=BG,
                     arrowcolor=FG_DIM, relief="flat", borderwidth=0)
 
     # ── layout ──────────────────────────────────────────────────────────
 
     def _build_ui(self):
+        # ── native menu bar (macOS picks this up as top-of-screen) ──────
+        self._setup_menubar()
+
         # ── toolbar ─────────────────────────────────────────────────────
-        bar = tk.Frame(self.root, bg=BG2, pady=9)
+        bar = tk.Frame(self.root, bg=BG2)
         bar.pack(side="top", fill="x")
-        tk.Frame(self.root, bg=BORDER, height=1).pack(side="top", fill="x")
+        tk.Frame(bar, bg=BG2, height=12).pack(side="top", fill="x")  # top breathing
 
-        tk.Label(bar, text="RoonTag", bg=BG2, fg=ACCENT,
-                 font=("SF Pro Display", 16, "bold")).pack(side="left", padx=16)
+        bar_inner = tk.Frame(bar, bg=BG2)
+        bar_inner.pack(side="top", fill="x", padx=16, pady=(0, 12))
 
-        ttk.Button(bar, text="Add Files…",  command=self._add_files).pack(side="left", padx=(0, 4))
-        ttk.Button(bar, text="Add Folder…", command=self._add_folder).pack(side="left", padx=4)
-        ttk.Button(bar, text="Clear Done",  command=self._clear_done).pack(side="left", padx=4)
-        ttk.Button(bar, text="⚙ Roon Folder…", command=self._set_roon_dir).pack(side="left", padx=4)
-        ttk.Button(bar, text="About",         command=self._show_about).pack(side="left", padx=4)
-        ttk.Button(bar, text="Check for Updates", command=lambda: self._check_for_updates(silent=False)).pack(side="left", padx=4)
-        ttk.Button(bar, text="Process All", command=self._process_all,
-                   style="Accent.TButton").pack(side="right", padx=16)
+        # Left cluster — bring work in
+        left_cluster = tk.Frame(bar_inner, bg=BG2)
+        left_cluster.pack(side="left")
+        tk.Label(left_cluster, text="RoonTag", bg=BG2, fg=ACCENT,
+                 font=("SF Pro Display", 17, "bold")).pack(side="left", padx=(0, 18))
+        ttk.Button(left_cluster, text="＋  Add Files",
+                   command=self._add_files).pack(side="left", padx=(0, 6))
+        ttk.Button(left_cluster, text="＋  Add Folder",
+                   command=self._add_folder).pack(side="left", padx=(0, 6))
+
+        # Right cluster — do the work
+        right_cluster = tk.Frame(bar_inner, bg=BG2)
+        right_cluster.pack(side="right")
+
         self._move_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar, text="Move to Roon", variable=self._move_var).pack(side="right", padx=(0, 4))
-        ttk.Button(bar, text="Fetch All Metadata",
-                   command=self._fetch_all_metadata).pack(side="right", padx=(0, 6))
+        ttk.Checkbutton(right_cluster, text="Move to Roon",
+                        variable=self._move_var,
+                        style="Card.TCheckbutton").pack(side="left", padx=(0, 14))
+        ttk.Button(right_cluster, text="Fetch All",
+                   command=self._fetch_all_metadata).pack(side="left", padx=(0, 6))
+        ttk.Button(right_cluster, text="Process All",
+                   command=self._process_all,
+                   style="Accent.TButton").pack(side="left")
+
+        # Toolbar bottom border
+        tk.Frame(self.root, bg=BORDER, height=1).pack(side="top", fill="x")
 
         # ── status bar ──────────────────────────────────────────────────
         tk.Frame(self.root, bg=BORDER, height=1).pack(side="bottom", fill="x")
@@ -945,18 +1078,40 @@ class RoonTag:
 
         self._build_detail_panel()
 
+    def _make_card(self, parent, title: str, pady_top: int = 0):
+        """Build a white rounded-feeling card with a section header label.
+
+        Returns the card body frame (child widgets should be packed with their
+        own padding). The card packs itself into `parent` so the caller can
+        chain cards top-to-bottom simply by calling this in order.
+        """
+        wrap = tk.Frame(parent, bg=BG)
+        wrap.pack(fill="x", padx=18, pady=(pady_top, 14))
+
+        card = tk.Frame(wrap, bg=BG2, highlightbackground=BORDER,
+                        highlightthickness=1)
+        card.pack(fill="x")
+
+        hdr = tk.Frame(card, bg=BG2)
+        hdr.pack(fill="x", padx=18, pady=(12, 6))
+        tk.Label(hdr, text=title.upper(), bg=BG2, fg=FG_DIM,
+                 font=("SF Pro Text", 10, "bold")).pack(anchor="w")
+
+        return card
+
     def _build_detail_panel(self):
         d = self._detail
 
-        # ── artwork + core fields ────────────────────────────────────────
-        top = tk.Frame(d, bg=BG)
-        top.pack(fill="x", padx=20, pady=(18, 10))
+        # ── section: Metadata card (artwork + fields) ─────────────────────
+        meta_card = self._make_card(d, "Metadata", pady_top=18)
+        top = tk.Frame(meta_card, bg=BG2)
+        top.pack(fill="x", padx=18, pady=(4, 16))
 
-        # Artwork box
-        art_col = tk.Frame(top, bg=BG)
+        # Artwork
+        art_col = tk.Frame(top, bg=BG2)
         art_col.pack(side="left", padx=(0, 22))
 
-        art_outer = tk.Frame(art_col, bg=BORDER, width=152, height=152)
+        art_outer = tk.Frame(art_col, bg=BORDER, width=160, height=160)
         art_outer.pack()
         art_outer.pack_propagate(False)
         self._art_label = tk.Label(art_outer, bg=BG3, fg=FG_DIM,
@@ -965,21 +1120,20 @@ class RoonTag:
         self._art_label.pack(expand=True, fill="both", padx=1, pady=1)
         self._art_label.bind("<Button-1>", lambda e: self._choose_artwork())
 
-        # Artwork action buttons
-        art_btns = tk.Frame(art_col, bg=BG)
-        art_btns.pack(fill="x", pady=(4, 0))
+        art_btns = tk.Frame(art_col, bg=BG2)
+        art_btns.pack(fill="x", pady=(6, 0))
         ttk.Button(art_btns, text="Paste",
                    command=self._paste_artwork).pack(side="left", padx=(0, 4))
         ttk.Button(art_btns, text="Choose…",
                    command=self._choose_artwork).pack(side="left")
 
         # Fields
-        ff = tk.Frame(top, bg=BG)
+        ff = tk.Frame(top, bg=BG2)
         ff.pack(side="left", fill="x", expand=True)
 
         def lbl(text):
-            tk.Label(ff, text=text, bg=BG, fg=FG_DIM,
-                     font=("SF Pro Text", 10, "bold")).pack(anchor="w", pady=(8, 1))
+            tk.Label(ff, text=text, bg=BG2, fg=FG_DIM,
+                     font=("SF Pro Text", 10, "bold")).pack(anchor="w", pady=(6, 2))
 
         self._title_var  = tk.StringVar()
         self._artist_var = tk.StringVar()
@@ -990,11 +1144,11 @@ class RoonTag:
         # Use tk.Entry (not ttk) so font + textvariable both work reliably
         self._title_entry = tk.Entry(
             ff, textvariable=self._title_var, width=42,
-            bg=BG2, fg=FG, insertbackground=FG, relief="flat",
+            bg=BG3, fg=FG, insertbackground=FG, relief="flat",
             font=("SF Pro Text", 13),
             highlightbackground=BORDER, highlightthickness=1,
         )
-        self._title_entry.pack(fill="x")
+        self._title_entry.pack(fill="x", ipady=3)
 
         def _force_title_save(event=None):
             import sys
@@ -1019,81 +1173,94 @@ class RoonTag:
         self._title_entry.bind("<FocusOut>", _force_title_save)
 
         lbl("ARTIST")
-        ttk.Entry(ff, textvariable=self._artist_var, width=42).pack(fill="x")
+        ttk.Entry(ff, textvariable=self._artist_var, width=42).pack(fill="x", ipady=3)
 
-        lbl("ALBUM  (leave blank for singles)")
-        ttk.Entry(ff, textvariable=self._album_var, width=42).pack(fill="x")
+        lbl("ALBUM    —  leave blank for a single")
+        ttk.Entry(ff, textvariable=self._album_var, width=42).pack(fill="x", ipady=3)
 
-        yr_row = tk.Frame(ff, bg=BG)
+        yr_row = tk.Frame(ff, bg=BG2)
         yr_row.pack(fill="x", pady=(0, 2))
-        yl = tk.Frame(yr_row, bg=BG)
+        yl = tk.Frame(yr_row, bg=BG2)
         yl.pack(side="left")
-        lbl_yr = tk.Label(yl, text="YEAR", bg=BG, fg=FG_DIM,
-                          font=("SF Pro Text", 10, "bold"))
-        lbl_yr.pack(anchor="w", pady=(8, 1))
-        ttk.Entry(yl, textvariable=self._year_var, width=8).pack(anchor="w")
+        tk.Label(yl, text="YEAR", bg=BG2, fg=FG_DIM,
+                 font=("SF Pro Text", 10, "bold")).pack(anchor="w", pady=(6, 2))
+        ttk.Entry(yl, textvariable=self._year_var, width=8).pack(anchor="w", ipady=3)
 
         # Live filename preview
         self._preview_var = tk.StringVar(value="")
         tk.Label(ff, textvariable=self._preview_var,
-                 bg=BG, fg=ACCENT,
+                 bg=BG2, fg=ACCENT,
                  font=("SF Pro Text", 11), anchor="w",
-                 wraplength=400).pack(fill="x", pady=(6, 0))
+                 wraplength=420).pack(fill="x", pady=(10, 0))
 
-        # Fetch + Apply
-        btn_row = tk.Frame(ff, bg=BG)
-        btn_row.pack(anchor="w", pady=(10, 0))
+        # Fetch + Save
+        btn_row = tk.Frame(ff, bg=BG2)
+        btn_row.pack(anchor="w", pady=(14, 0))
         ttk.Button(btn_row, text="Fetch Metadata + Artwork",
-                   command=self._fetch_current_metadata).pack(side="left", padx=(0, 8))
+                   command=self._fetch_current_metadata).pack(side="left", padx=(0, 6))
         ttk.Button(btn_row, text="Save Changes",
                    command=self._apply_fields).pack(side="left")
 
-        # ── divider ──────────────────────────────────────────────────────
-        tk.Frame(d, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(4, 10))
-
-        # ── type flags ───────────────────────────────────────────────────
-        tf = tk.Frame(d, bg=BG)
-        tf.pack(fill="x", padx=20, pady=(0, 8))
-        tk.Label(tf, text="TYPE", bg=BG, fg=FG_DIM,
-                 font=("SF Pro Text", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        # ── section: Album Type ──────────────────────────────────────────
+        type_card = self._make_card(d, "Album Type")
+        tf = tk.Frame(type_card, bg=BG2)
+        tf.pack(fill="x", padx=18, pady=(2, 16))
 
         self._is_dj_var   = tk.BooleanVar()
         self._is_live_var = tk.BooleanVar()
         self._is_comp_var = tk.BooleanVar()
 
-        flags_row = tk.Frame(tf, bg=BG)
+        flags_row = tk.Frame(tf, bg=BG2)
         flags_row.pack(anchor="w")
         ttk.Checkbutton(flags_row, text="DJ Mix / Radio Set",
                         variable=self._is_dj_var,
-                        command=self._on_type_change).pack(side="left", padx=(0, 16))
+                        command=self._on_type_change,
+                        style="Card.TCheckbutton").pack(side="left", padx=(0, 18))
         ttk.Checkbutton(flags_row, text="Live Album",
                         variable=self._is_live_var,
-                        command=self._on_type_change).pack(side="left", padx=(0, 16))
+                        command=self._on_type_change,
+                        style="Card.TCheckbutton").pack(side="left", padx=(0, 18))
         ttk.Checkbutton(flags_row, text="Compilation",
                         variable=self._is_comp_var,
-                        command=self._on_type_change).pack(side="left")
+                        command=self._on_type_change,
+                        style="Card.TCheckbutton").pack(side="left")
 
-        # ── tracklist (DJ mix only) ───────────────────────────────────────
-        self._tl_frame = tk.Frame(d, bg=BG)
-        tk.Label(self._tl_frame, text="TRACKLIST  (embedded as lyrics in the file)",
-                 bg=BG, fg=FG_DIM,
-                 font=("SF Pro Text", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        tk.Label(tf, bg=BG2, fg=FG_MUTED,
+                 text=("Flagging any of these reveals the Tracklist field "
+                       "below — useful for single-file mixes, live sets, or "
+                       "compilations where you want a full tracklist in the "
+                       "Lyrics tag so Roon can read it."),
+                 font=("SF Pro Text", 11), wraplength=680,
+                 justify="left").pack(anchor="w", pady=(10, 0))
+
+        # ── section: Tracklist (conditional) ─────────────────────────────
+        self._tl_card = self._make_card(d, "Tracklist  —  embedded as lyrics")
+        tl_body = tk.Frame(self._tl_card, bg=BG2)
+        tl_body.pack(fill="both", expand=True, padx=18, pady=(2, 16))
         self._tl_text = tk.Text(
-            self._tl_frame,
-            bg=BG2, fg=FG, insertbackground=FG,
-            relief="flat", borderwidth=1,
+            tl_body,
+            bg=BG3, fg=FG, insertbackground=FG,
+            relief="flat", borderwidth=0,
             highlightbackground=BORDER, highlightthickness=1,
-            font=("SF Mono", 11), height=7, wrap="word",
+            font=("SF Mono", 11), height=8, wrap="word",
+            padx=10, pady=8,
         )
         self._tl_text.pack(fill="both", expand=True)
+        tk.Label(tl_body, bg=BG2, fg=FG_MUTED,
+                 text="One track per line. Example: 00:00 · Artist – Title",
+                 font=("SF Pro Text", 10),
+                 justify="left").pack(anchor="w", pady=(6, 0))
 
-        # ── track table (multi-track albums) ─────────────────────────────
-        self._tracks_frame = tk.Frame(d, bg=BG)
-        tk.Label(self._tracks_frame, text="TRACKS  (double-click to edit title or artist)",
-                 bg=BG, fg=FG_DIM,
-                 font=("SF Pro Text", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        # ── section: Tracks (multi-track albums) ─────────────────────────
+        self._tracks_card = self._make_card(d, "Tracks")
+        tracks_body = tk.Frame(self._tracks_card, bg=BG2)
+        tracks_body.pack(fill="both", expand=True, padx=18, pady=(2, 16))
+        tk.Label(tracks_body, bg=BG2, fg=FG_MUTED,
+                 text="Double-click a cell to edit the number, title, or artist.",
+                 font=("SF Pro Text", 10),
+                 justify="left").pack(anchor="w", pady=(0, 8))
 
-        tf2 = tk.Frame(self._tracks_frame, bg=BG)
+        tf2 = tk.Frame(tracks_body, bg=BG2)
         tf2.pack(fill="both", expand=True)
         sb2 = ttk.Scrollbar(tf2, orient="vertical")
         self._track_tree = ttk.Treeview(
@@ -1414,11 +1581,11 @@ class RoonTag:
             self._track_tree.insert("", "end",
                                     values=(t.track_num or "", t.title, t.artist, dur))
 
-        # Show tracks section only for multi-track items
+        # Show tracks card only for multi-track items
         if len(alb.tracks) > 1:
-            self._tracks_frame.pack(fill="x", padx=20, pady=(0, 12))
+            self._tracks_card.pack(fill="x", padx=18, pady=(0, 14))
         else:
-            self._tracks_frame.pack_forget()
+            self._tracks_card.pack_forget()
 
         # Tracklist
         self._on_type_change()
@@ -1443,10 +1610,17 @@ class RoonTag:
         self._art_label.configure(image="", text="No Artwork")
 
     def _on_type_change(self):
-        if self._is_dj_var.get():
-            self._tl_frame.pack(fill="x", padx=20, pady=(0, 12))
+        """Show the Tracklist section whenever the user flags this album as a
+        DJ mix, live album, or compilation. Those are the cases where a single
+        file (or grouping) contains multiple pieces of music, and embedding a
+        tracklist into Lyrics is what lets Roon identify the pieces."""
+        show_tl = (self._is_dj_var.get()
+                   or self._is_live_var.get()
+                   or self._is_comp_var.get())
+        if show_tl:
+            self._tl_card.pack(fill="x", padx=18, pady=(0, 14))
         else:
-            self._tl_frame.pack_forget()
+            self._tl_card.pack_forget()
 
     def _set_detail_enabled(self, on: bool):
         state = "normal" if on else "disabled"
@@ -1748,34 +1922,59 @@ class RoonTag:
     def _check_for_updates(self, silent: bool = True):
         """Fetch latest release metadata from GitHub, prompt user if newer.
 
-        silent=True: called on startup. No 'you're up to date' popup.
-        silent=False: called from the toolbar button. Always reports status.
+        silent=True: called on startup. No 'up-to-date' popup, no error popup.
+        silent=False: called from the menu item. Always reports the result.
         """
+        if not silent:
+            self._status("Checking for updates…")
         def worker():
-            data = _fetch_latest_release()
-            # Back to the Tk thread
-            self.root.after(0, lambda: self._handle_update_info(data, silent))
+            status, data = _fetch_latest_release()
+            self.root.after(0, lambda: self._handle_update_info(status, data, silent))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _handle_update_info(self, data: dict, silent: bool):
+    def _handle_update_info(self, status: str, data: dict, silent: bool):
+        local_ver = VERSION
+
+        if status == "no_releases":
+            self._status(f"Up to date (v{local_ver}) — no releases published yet.")
+            if not silent:
+                messagebox.showinfo(
+                    "RoonTag",
+                    f"No releases have been published to GitHub yet.\n\n"
+                    f"Running version: {local_ver}\n\n"
+                    f"Run `bash publish.sh` on the dev Mac to cut the first release."
+                )
+            return
+
+        if status == "error":
+            self._status("Update check failed.")
+            if not silent:
+                messagebox.showwarning(
+                    "Couldn't check for updates",
+                    f"{data.get('msg', 'Unknown error')}\n\n"
+                    f"Running version: {local_ver}"
+                )
+            return
+
         if not data or "tag_name" not in data:
+            self._status("Update check returned no data.")
             if not silent:
                 messagebox.showwarning(
                     "RoonTag",
-                    "Couldn't reach GitHub to check for updates.\n"
-                    "Check your internet connection and try again."
+                    "GitHub returned an unexpected response."
                 )
             return
 
         remote_tag = data.get("tag_name", "")
         remote_ver = remote_tag.lstrip("v")
-        local_ver  = VERSION
 
         if _parse_version(remote_ver) <= _parse_version(local_ver):
+            self._status(f"Up to date (v{local_ver}).")
             if not silent:
                 messagebox.showinfo(
-                    "RoonTag",
-                    f"You're up to date.\n\nRunning version: {local_ver}"
+                    "You're up to date",
+                    f"Running version: {local_ver}\n"
+                    f"Latest release:  {remote_ver}"
                 )
             return
 
