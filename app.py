@@ -165,6 +165,19 @@ if getattr(_sys, "frozen", False):
     except Exception:
         pass
 
+# Force Python's HTTPS layer to use certifi's CA bundle. PyInstaller builds
+# can't find the system keychain on macOS, which breaks urllib with
+# "CERTIFICATE_VERIFY_FAILED". Override default context so GitHub / iTunes /
+# CAA / Deezer metadata calls all succeed.
+try:
+    import ssl as _ssl
+    import certifi as _certifi
+    _ssl._create_default_https_context = lambda: _ssl.create_default_context(
+        cafile=_certifi.where()
+    )
+except Exception as _e:
+    print(f"[RoonTag] SSL/certifi setup skipped: {_e}", file=_sys.stderr, flush=True)
+
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     HAS_DND = True
@@ -289,6 +302,86 @@ class Album:
 def _sanitize(s: str) -> str:
     """Remove characters illegal in macOS filenames."""
     return re.sub(r'[/:*?"<>|\\]', "-", s).strip()
+
+def _detect_container(path: Path) -> str:
+    """Sniff the actual container format from file magic bytes.
+
+    Returns one of: 'mp3', 'flac', 'aiff', 'mp4', 'wav', 'webm', 'ogg',
+    'unknown'. Independent of the file's extension — this is what the
+    *content* actually is.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32)
+    except OSError:
+        return "unknown"
+
+    # ID3v2-tagged file: skip past the tag to find the real signature.
+    if head[:3] == b"ID3" and len(head) >= 10:
+        try:
+            tag_size = ((head[6] & 0x7F) << 21) | \
+                       ((head[7] & 0x7F) << 14) | \
+                       ((head[8] & 0x7F) << 7)  | \
+                        (head[9] & 0x7F)
+            with open(path, "rb") as f:
+                f.seek(10 + tag_size)
+                probe = f.read(8)
+            if len(probe) >= 2 and probe[0] == 0xFF and (probe[1] & 0xE0) == 0xE0:
+                return "mp3"
+            if probe[:4] == b"\x1A\x45\xDF\xA3":
+                return "webm"
+            if probe[:4] == b"OggS":
+                return "ogg"
+            if probe[:4] == b"fLaC":
+                return "flac"
+            if probe[:4] == b"FORM":
+                return "aiff"
+            if len(probe) >= 8 and probe[4:8] == b"ftyp":
+                return "mp4"
+            # ID3 tag exists but we can't recognize what's after it.
+            return "unknown"
+        except Exception:
+            pass
+
+    # Non-ID3 file signatures
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return "mp3"
+    if head[:4] == b"fLaC":
+        return "flac"
+    if head[:4] == b"FORM" and head[8:12] in (b"AIFF", b"AIFC"):
+        return "aiff"
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav"
+    if head[:4] == b"OggS":
+        return "ogg"
+    if head[:4] == b"\x1A\x45\xDF\xA3":
+        return "webm"
+    if len(head) >= 8 and head[4:8] == b"ftyp":
+        return "mp4"
+    return "unknown"
+
+
+def _verify_extension(path: Path) -> tuple:
+    """Check that the file extension matches the sniffed container.
+
+    Returns (ok, expected_group, detected). `expected_group` is the family
+    the extension implies (e.g. .aif and .aiff both map to 'aiff'). If the
+    real format is 'unknown' we don't flag it — we trust the extension to
+    avoid false positives.
+    """
+    ext_group = {
+        "mp3": "mp3",
+        "flac": "flac",
+        "aif": "aiff", "aiff": "aiff",
+        "wav": "wav",
+        "m4a": "mp4",
+    }.get(path.suffix.lower().lstrip("."), "unknown")
+
+    detected = _detect_container(path)
+    if detected == "unknown":
+        return True, ext_group, detected
+    return ext_group == detected, ext_group, detected
+
 
 def _music_files(paths: list[Path]) -> list[Path]:
     out = []
@@ -1483,6 +1576,40 @@ class RoonTag:
         if not files:
             self._status("No music files found.")
             return
+
+        # Sniff container format — catch files with the wrong extension
+        # (e.g. WebM/Opus renamed as .mp3 from a YouTube download). Roon
+        # silently rejects these, so we'd rather warn the user now.
+        fakes = []
+        for p in files:
+            ok, expected, detected = _verify_extension(p)
+            if not ok:
+                fakes.append((p, expected, detected))
+
+        if fakes:
+            lines = []
+            for p, expected, detected in fakes:
+                lines.append(
+                    f"  • {p.name}\n"
+                    f"       extension: .{expected}    actual content: {detected}"
+                )
+            msg = (
+                "These file(s) have the wrong extension for their "
+                "actual content:\n\n"
+                + "\n\n".join(lines)
+                + "\n\nRoon silently rejects files like these. To fix, run this "
+                "in Terminal (one line per bad file):\n\n"
+                '  ffmpeg -i "bad.mp3" -map_metadata 0 -c:a libmp3lame '
+                '-b:a 320k "fixed.mp3"\n\n'
+                "Then re-add the fixed file to RoonTag.\n\n"
+                "Add the bad file(s) to the queue anyway?"
+            )
+            if not messagebox.askyesno("Misnamed audio file(s) detected", msg):
+                bad_paths = {p for p, _, _ in fakes}
+                files = [p for p in files if p not in bad_paths]
+                if not files:
+                    self._status("All dropped files had wrong extensions — nothing added.")
+                    return
 
         # If folders were dropped, group files by their parent directory —
         # each folder becomes its own album.

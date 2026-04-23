@@ -2,6 +2,21 @@
 
 All notable changes to RoonTag. Newest first.
 
+## 1.4.2 — 2026-04-22
+- Fixed: `CERTIFICATE_VERIFY_FAILED` error when checking for updates (and
+  when fetching metadata/artwork) in the packaged .app. PyInstaller
+  builds can't find the system keychain on macOS, so urllib's default
+  context couldn't validate GitHub's certificate. Now forces certifi's
+  bundled CA store as the default for all HTTPS requests.
+
+## 1.4.1 — 2026-04-22
+- Added: container sniffing at ingestion. When you drop in an audio file
+  whose extension lies about its content (e.g. a YouTube download that's
+  actually Opus-in-WebM renamed to `.mp3`), RoonTag now pops a warning
+  dialog explaining what it actually is and giving you the `ffmpeg`
+  command to transcode it properly. Detects MP3, FLAC, AIFF, WAV, M4A,
+  WebM, and Ogg containers.
+
 ## 1.4.0 — 2026-04-22
 - Redesigned UI. Toolbar is now grouped into intake (Add Files / Add
   Folder) on the left and action (Fetch / Process) on the right. The
