@@ -1,0 +1,40 @@
+#!/bin/bash
+# One-command update for RoonTag on any of your Macs.
+#
+# Run this after a code change has been pushed from another machine:
+#   roontag-update
+#
+# What it does:
+#   1. git pull (source of truth is the private GitHub repo)
+#   2. bash setup.sh        — if venv/ is missing
+#   3. bash build_tkdnd.sh  — if tkdnd_lib/ is missing
+#   4. bash build_app.sh    — rebuild + install into /Applications/
+#
+# Install: symlink into your PATH once per machine, e.g.
+#   ln -sf "$(pwd)/roontag-update" /usr/local/bin/roontag-update
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+echo "==> Pulling latest from git…"
+git pull --ff-only
+
+# venv + tkdnd are .gitignored (per-machine build artifacts). Bootstrap if absent.
+if [ ! -d "$SCRIPT_DIR/venv" ]; then
+    echo "==> venv missing — running setup.sh…"
+    bash "$SCRIPT_DIR/setup.sh"
+fi
+
+if [ ! -d "$SCRIPT_DIR/tkdnd_lib/lib" ]; then
+    echo "==> tkdnd_lib missing — running build_tkdnd.sh…"
+    bash "$SCRIPT_DIR/build_tkdnd.sh"
+fi
+
+echo "==> Rebuilding app…"
+bash "$SCRIPT_DIR/build_app.sh"
+
+VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION" 2>/dev/null || echo dev)"
+echo ""
+echo "✓  RoonTag v$VERSION is now current on this Mac."

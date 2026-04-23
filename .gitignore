@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtualenv (built fresh by setup.sh on each machine)
+venv/
+
+# Build artifacts (regenerated on each machine by build_app.sh)
+build/
+dist/
+RoonTag.spec
+*.app/
+
+# tkdnd build output (regenerated on each machine by build_tkdnd.sh)
+tkdnd_lib/
+
+# macOS cruft
+.DS_Store
+
+# Logs
+*.log
