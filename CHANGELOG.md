@@ -2,6 +2,12 @@
 
 All notable changes to RoonTag. Newest first.
 
+## 1.4.3 — 2026-04-22
+- Fixed: Check for Updates no longer says "You're up to date" when the
+  running version is actually *newer* than the latest GitHub Release.
+  Now distinguishes three cases: up-to-date, ahead of release channel
+  (dev build), or update available.
+
 ## 1.4.2 — 2026-04-22
 - Fixed: `CERTIFICATE_VERIFY_FAILED` error when checking for updates (and
   when fetching metadata/artwork) in the packaged .app. PyInstaller

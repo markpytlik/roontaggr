@@ -2095,13 +2095,31 @@ class RoonTag:
         remote_tag = data.get("tag_name", "")
         remote_ver = remote_tag.lstrip("v")
 
-        if _parse_version(remote_ver) <= _parse_version(local_ver):
+        local_t = _parse_version(local_ver)
+        remote_t = _parse_version(remote_ver)
+
+        if local_t == remote_t:
             self._status(f"Up to date (v{local_ver}).")
             if not silent:
                 messagebox.showinfo(
                     "You're up to date",
                     f"Running version: {local_ver}\n"
                     f"Latest release:  {remote_ver}"
+                )
+            return
+
+        if local_t > remote_t:
+            # Dev Mac running an unpublished build.
+            self._status(f"Ahead of release channel (local {local_ver} > {remote_ver}).")
+            if not silent:
+                messagebox.showinfo(
+                    "Running a development build",
+                    f"You're running a build that's newer than the latest "
+                    f"GitHub Release.\n\n"
+                    f"Running version: {local_ver}\n"
+                    f"Latest release:  {remote_ver}\n\n"
+                    f"Run `bash publish.sh` to cut a {local_ver} release so "
+                    f"the other Macs can pick it up."
                 )
             return
 
