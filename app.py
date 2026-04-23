@@ -2110,16 +2110,16 @@ class RoonTag:
 
         if local_t > remote_t:
             # Dev Mac running an unpublished build.
-            self._status(f"Ahead of release channel (local {local_ver} > {remote_ver}).")
+            self._status(f"Version {local_ver} hasn't been published yet.")
             if not silent:
                 messagebox.showinfo(
-                    "Running a development build",
-                    f"You're running a build that's newer than the latest "
-                    f"GitHub Release.\n\n"
-                    f"Running version: {local_ver}\n"
-                    f"Latest release:  {remote_ver}\n\n"
-                    f"Run `bash publish.sh` to cut a {local_ver} release so "
-                    f"the other Macs can pick it up."
+                    "Unpublished version",
+                    f"This Mac is already on the newest version "
+                    f"({local_ver}).\n\n"
+                    f"Your other Macs can only see version {remote_ver} "
+                    f"right now. To share {local_ver} with them, run "
+                    f"this in Terminal on this Mac:\n\n"
+                    f"    bash publish.sh"
                 )
             return
 

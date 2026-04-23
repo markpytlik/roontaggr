@@ -2,6 +2,12 @@
 
 All notable changes to RoonTag. Newest first.
 
+## 1.4.4 — 2026-04-22
+- Changed: friendlier wording in the Check for Updates dialog when this
+  Mac is ahead of the published release. No more "build" / "GitHub
+  Release" jargon — just "this Mac is already on the newest version
+  (X.Y.Z). Run `bash publish.sh` to share it with your other Macs."
+
 ## 1.4.3 — 2026-04-22
 - Fixed: Check for Updates no longer says "You're up to date" when the
   running version is actually *newer* than the latest GitHub Release.
