@@ -1587,22 +1587,36 @@ class RoonTag:
                 fakes.append((p, expected, detected))
 
         if fakes:
-            lines = []
+            diag_lines = []
+            cmd_lines = []
             for p, expected, detected in fakes:
-                lines.append(
+                diag_lines.append(
                     f"  • {p.name}\n"
                     f"       extension: .{expected}    actual content: {detected}"
                 )
+                # Build a copy-paste-ready ffmpeg command using the file's real
+                # absolute path and a "-FIXED" sibling as output. Shell-quote
+                # via Python's shlex so paths with spaces/special chars work.
+                import shlex
+                src = str(p)
+                dst = str(p.with_name(p.stem + "-FIXED" + p.suffix))
+                cmd_lines.append(
+                    f"ffmpeg -i {shlex.quote(src)} -map_metadata 0 "
+                    f"-c:a libmp3lame -b:a 320k {shlex.quote(dst)}"
+                )
+
             msg = (
                 "These file(s) have the wrong extension for their "
                 "actual content:\n\n"
-                + "\n\n".join(lines)
-                + "\n\nRoon silently rejects files like these. To fix, run this "
-                "in Terminal (one line per bad file):\n\n"
-                '  ffmpeg -i "bad.mp3" -map_metadata 0 -c:a libmp3lame '
-                '-b:a 320k "fixed.mp3"\n\n'
-                "Then re-add the fixed file to RoonTag.\n\n"
-                "Add the bad file(s) to the queue anyway?"
+                + "\n\n".join(diag_lines)
+                + "\n\nRoon silently rejects files like these. To fix, "
+                "paste this into Terminal (one command per bad file):\n\n"
+                + "\n\n".join(cmd_lines)
+                + "\n\nAfter ffmpeg finishes, each file will sit next to the "
+                "original with \"-FIXED\" in the name. Re-add the -FIXED "
+                "version to RoonTag (and delete the original once you've "
+                "confirmed it plays).\n\n"
+                "Add the original (broken) file(s) to the queue anyway?"
             )
             if not messagebox.askyesno("Misnamed audio file(s) detected", msg):
                 bad_paths = {p for p, _, _ in fakes}

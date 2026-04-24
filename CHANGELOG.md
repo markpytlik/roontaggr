@@ -2,6 +2,12 @@
 
 All notable changes to RoonTag. Newest first.
 
+## 1.4.5 — 2026-04-22
+- Changed: the misnamed-audio warning dialog now builds a copy-paste-ready
+  ffmpeg command per bad file, using the file's real absolute path and a
+  "-FIXED" sibling as the output. No more editing placeholders by hand —
+  triple-click the line and paste into Terminal.
+
 ## 1.4.4 — 2026-04-22
 - Changed: friendlier wording in the Check for Updates dialog when this
   Mac is ahead of the published release. No more "build" / "GitHub
